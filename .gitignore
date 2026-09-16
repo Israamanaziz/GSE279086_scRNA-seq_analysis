@@ -2,7 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
-.Rproj.user/
+.Rproj
 .ipynb_checkpoints/
 .vscode/
 
@@ -14,6 +14,7 @@ raw_geo_data/
 *.h5ad
 *.pkl
 *.csv
+*.txt
 
 # OS generated files
 .DS_Store
