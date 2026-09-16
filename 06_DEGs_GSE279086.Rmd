@@ -1,0 +1,220 @@
+---
+title: "06_DEGs_GSE279086"
+author: "Isra Aman Aziz"
+date: "2026-08-22"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install(c("MAST","zellkonverter"))
+
+```
+
+```{r}
+library (SingleCellExperiment)
+library (Seurat)
+library(MAST)
+library (zellkonverter)
+
+```
+
+```{r}
+Sys.setenv(
+  HDF5_USE_FILE_LOCKING = "FALSE"
+)
+
+Sys.getenv("HDF5_USE_FILE_LOCKING")
+
+```
+
+```{r}
+setwd("/home/israa/GSE279086_scRNA-seq_analysis")
+sce <- readH5AD("output/GSE279086_celltypist.h5ad")
+
+seurat_obj <- as.Seurat(
+  sce,
+  counts = "counts",
+  data = "logcounts"
+)
+
+saveRDS(seurat_obj, "output/GSE279086_with_celltypist.rds")
+```
+
+```{r}
+seurat_obj <- readRDS("output/GSE279086_with_celltypist.rds")
+
+colnames(seurat_obj@meta.data)
+table(seurat_obj$Condition, seurat_obj$majority_voting)
+
+# Remove _control, _T1D from majority_voting
+seurat_obj$majority_voting <- gsub("_(Control|Type 1 Diabetes)$", "", seurat_obj$majority_voting)
+
+table(seurat_obj$Condition, seurat_obj$majority_voting) 
+```
+
+```{r}
+DefaultAssay(seurat_obj) <- "originalexp"
+celltypes <- sort(unique(seurat_obj$majority_voting))
+celltypes
+
+celltypes <- gsub("-", "_", celltypes)
+celltypes
+```
+
+```{r}
+run_mast_per_celltype_T1D_vs_Control <- function(
+  seu,
+  celltype_col = "majority_voting",     # annotation column
+  condition_col = "Condition",   
+  outdir = "output/DEG_MAST_T1D_vs_Control",
+  min_cells_per_group = 20
+) {
+
+  dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+  meta <- seu@meta.data
+  celltypes <- sort(unique(meta[[celltype_col]]))
+
+  for (ct in celltypes) {
+
+    cat("\n▶ Processing cell type:", ct, "\n")
+
+    cells_ct <- rownames(meta)[meta[[celltype_col]] == ct]
+    cond_tab <- table(meta[cells_ct, condition_col])
+
+    # ---- check both groups exist
+    if (!all(c("Type 1 Diabetes", "Control") %in% names(cond_tab))) {
+      cat("Type 1 Diabetes Or Control missing → skipping \n")
+      next
+    }
+
+    # ---- minimum cells check
+    if (any(cond_tab[c("Type 1 Diabetes", "Control")] < min_cells_per_group)) {
+      cat("Not enough cells → skipping\n")
+      next
+    }
+
+    # ---- subset object
+    seu_ct <- subset(seu, cells = cells_ct)
+    DefaultAssay(seu_ct) <- "originalexp"
+    seu_ct <- NormalizeData(seu_ct, verbose = FALSE)
+
+    Idents(seu_ct) <- condition_col
+
+    # ---- run MAST
+    deg <- FindMarkers(
+      seu_ct,
+      ident.1 = "Type 1 Diabetes",
+      ident.2 = "Control",
+      test.use = "MAST",
+      logfc.threshold = 0,
+      min.pct = 0.1,
+      latent.vars = c("nCount_RNA", "percent.mt")
+    )
+
+    deg$gene <- rownames(deg)
+
+    # 🔥 CRITICAL FIX (THIS LINE SOLVES YOUR ERROR)
+    ct_clean <- gsub("[^a-zA-Z0-9]", "_", ct)
+
+    out_file <- file.path(
+      outdir,
+      paste0("DEG_", ct_clean, "_T1D_vs_Control.csv")
+    )
+
+    write.csv(deg, out_file, row.names = FALSE)
+
+    cat("  ✔ Saved:", out_file, "\n")
+  }
+}
+
+```
+
+```{r}
+run_mast_per_celltype_T1D_vs_Control(
+  seu = seurat_obj,
+  celltype_col = "majority_voting",   
+  condition_col = "Condition"
+)
+
+```
+
+```{r}
+library(clusterProfiler)
+library(ReactomePA)
+library(tidyverse)
+library(org.Hs.eg.db)
+library(dplyr)
+library(ggplot2)
+library(enrichplot)
+
+deg_path <- "output/DEG_MAST_T1D_vs_Control"
+
+deg_files <- list.files(
+  deg_path,
+  pattern = "^DEG_.*\\.csv$",
+  full.names = TRUE
+)
+
+deg_files
+
+# --------------------------------------------------
+# Fix gene column name ONLY for DEG files
+# --------------------------------------------------
+for (file in deg_files) {
+  df <- read.csv(file, header = TRUE, stringsAsFactors = FALSE)
+  
+  if (colnames(df)[1] %in% c("", "X")) {
+    colnames(df)[1] <- "genes"
+  }
+  
+  write.csv(df, file, row.names = FALSE)
+}
+
+deg_summary <- data.frame(
+  CellType = character(),
+  Upregulated = integer(),
+  Downregulated = integer(),
+  Total_DEGs = integer(),
+  stringsAsFactors = FALSE
+)
+
+for (file in deg_files) {
+  deg_data <- read.csv(file)
+  
+  if (!all(c("avg_log2FC", "p_val_adj") %in% colnames(deg_data))) {
+    warning(paste("Skipping (missing columns):", basename(file)))
+    next
+  }
+  
+  up   <- sum(deg_data$avg_log2FC > 0 & deg_data$p_val_adj < 0.05)
+  down <- sum(deg_data$avg_log2FC < 0 & deg_data$p_val_adj < 0.05)
+  
+  celltype <- gsub("^DEG_(.*?)_T1D_vs_Control\\.csv$", "\\1", basename(file))
+  
+  deg_summary <- rbind(
+    deg_summary,
+    data.frame(
+      CellType = celltype,
+      Upregulated = up,
+      Downregulated = down,
+      Total_DEGs = up + down
+    )
+  )
+}
+
+deg_summary <- deg_summary %>% arrange(desc(Total_DEGs))
+
+print(deg_summary)
+
+write.csv(
+  deg_summary,
+  "output/DEG_MAST_T1D_vs_Control/DEGsummary_table.csv",
+  row.names = FALSE
+)
+```

@@ -1,0 +1,20 @@
+# R & IDE specific folders/files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.ipynb_checkpoints/
+.vscode/
+
+# Large Data, Raw Files & Outputs (Ignored)
+input/
+output/
+raw_geo_data/
+*.rds
+*.h5ad
+*.pkl
+*.csv
+
+# OS generated files
+.DS_Store
+Thumbs.db
